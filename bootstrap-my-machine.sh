@@ -179,7 +179,7 @@ EOF
 
 # clone_or_pull is also defined in the bootstrap body above (used to install the
 # zshrc.d plugin). We additionally write it as an autoloaded function because
-# several install_* functions below (aws_vault, tfenv, tgenv, rbenv, goenv) call
+# several install_* functions below (aws_vault, tfenv, tgenv, goenv) call
 # it at runtime, long after the bootstrap process has exited - without this they
 # would fail with "command not found: clone_or_pull".
 create_zsh_function "clone_or_pull" << 'EOF'
@@ -277,13 +277,26 @@ install_asdf () {
 
   echo "Don't forget to add asdf to your oh-my-zsh plugins"
 
+  # The python and ruby plugins compile interpreters from source using pyenv's
+  # python-build and rbenv's ruby-build backends, so they need the C toolchain
+  # and library headers those builds expect. This is the set that used to live in
+  # install_pyenv, plus autoconf/libyaml-dev/libgmp-dev for Ruby.
+  sudo apt install -y \
+    build-essential autoconf xz-utils tk-dev \
+    libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
+    libncurses-dev libffi-dev liblzma-dev \
+    libyaml-dev libgmp-dev
+
   # Install NodeJS ASDF plugin
   asdf plugin add nodejs https://github.com/asdf-vm/asdf-nodejs.git
 
   # Install pnpm ASDF plugin
   asdf plugin add pnpm
 
-  # Install Ruby ASDF plugin
+  # Install Python ASDF plugin (replaces the standalone pyenv installer)
+  asdf plugin add python https://github.com/asdf-community/asdf-python.git
+
+  # Install Ruby ASDF plugin (replaces the standalone rbenv installer)
   asdf plugin add ruby https://github.com/asdf-vm/asdf-ruby.git
 
   # Install Pandoc ASDF plugin
@@ -614,28 +627,6 @@ install_tgenv () {
 install_tgenv "$@"
 EOF
 
-create_zsh_function "install_pyenv" << 'EOF'
-install_pyenv () {
-  # Install PyEnv
-  curl https://pyenv.run | bash
-
-  cat << 'EHEREDOC' > ~/.zshrc.d/pyenv.zsh
-export PYENV_ROOT="$HOME/.pyenv"
-command -v pyenv >/dev/null || export PATH="$PYENV_ROOT/bin:$PATH"
-eval "$(pyenv init -)"
-EHEREDOC
-
-  # Install packages required by PyEnv to build Python distributions
-  # https://github.com/pyenv/pyenv/wiki/Common-build-problems
-  sudo apt install -y zlib1g zlib1g-dev libssl-dev libbz2-dev libsqlite3-dev libffi-dev
-  # libncursesw5 was dropped in Ubuntu 24.04; libncurses-dev provides the wide
-  # headers pyenv needs to build CPython.
-  sudo apt install -y libncurses-dev libreadline-dev tk-dev liblzma-dev
-}
-
-install_pyenv "$@"
-EOF
-
 create_zsh_function "install_pip" << 'EOF'
 install_pip () {
   # Install pip in system python
@@ -661,19 +652,6 @@ install_cruft () {
 }
 
 install_cruft "$@"
-EOF
-
-create_zsh_function "install_rbenv" << 'EOF'
-install_rbenv () {
-  clone_or_pull https://github.com/rbenv/rbenv.git ~/.rbenv
-  echo 'eval "$(~/.rbenv/bin/rbenv init - zsh)"' >> ~/.zshrc.d/rbenv.zsh
-
-  # Install ruby-build as RBEnv install command
-  eval "$(~/.rbenv/bin/rbenv init - zsh)" # Init rbenv so the "root" command below works.
-  clone_or_pull https://github.com/rbenv/ruby-build.git "$(rbenv root)"/plugins/ruby-build
-}
-
-install_rbenv "$@"
 EOF
 
 create_zsh_function "install_goenv" << 'EOF'
