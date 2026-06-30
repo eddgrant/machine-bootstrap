@@ -1,0 +1,149 @@
+name: CI
+
+# Runs the bootstrap and every install_* function on a fresh GitHub-hosted
+# Ubuntu runner (a real VM with passwordless sudo - no self-hosted VM needed).
+#
+# - On PRs / pushes: catches breakage introduced by a change.
+# - On the weekly schedule: a canary for upstream rot (moved download URLs,
+#   retired apt repos, scraped pages whose markup changed).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax-check shell scripts
+        run: |
+          bash -n bootstrap-my-machine.sh
+          for f in ci/*.sh; do bash -n "$f"; done
+      - name: shellcheck
+        run: |
+          # The CI helpers we lint strictly. The bootstrap script embeds zsh
+          # function bodies inside single-quoted heredocs (opaque strings to
+          # shellcheck), so we only sanity-check its outer shell at error level.
+          shellcheck --severity=warning ci/*.sh
+          shellcheck --severity=error bootstrap-my-machine.sh
+
+  discover:
+    name: discover installers
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: set
+        name: Build matrix from bootstrap script
+        run: |
+          echo "matrix={\"include\":$(bash ci/list-installers.sh matrix)}" >> "$GITHUB_OUTPUT"
+
+  install:
+    name: ${{ matrix.name }}
+    needs: discover
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Optional installers (snaps, fragile external sources) are allowed to fail
+    # without failing the build; required ones turn the build red.
+    continue-on-error: ${{ matrix.optional }}
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap the zsh framework
+        run: ./bootstrap-my-machine.sh
+
+      - name: Run ${{ matrix.name }}
+        id: run
+        run: bash ci/run-installer.sh "${{ matrix.name }}"
+
+      - name: Record result
+        if: always()
+        run: |
+          mkdir -p results
+          printf '%s\t%s\t%s\n' \
+            "${{ matrix.name }}" "${{ steps.run.outcome }}" "${{ matrix.optional }}" \
+            > "results/${{ matrix.name }}.tsv"
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.name }}
+          path: results/${{ matrix.name }}.tsv
+          retention-days: 7
+
+  summary:
+    name: summary
+    needs: install
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: result-*
+          merge-multiple: true
+
+      - name: Build report
+        id: report
+        run: |
+          {
+            echo "### Installer results"
+            echo
+            echo "| Installer | Result | Tier |"
+            echo "|---|---|---|"
+          } > report.md
+          # Body sorted with failures first, then alphabetically.
+          for f in results/*.tsv; do
+            [ -e "$f" ] || continue
+            IFS=$'\t' read -r name outcome optional < "$f"
+            case "$outcome" in
+              success) icon="✅ pass" ; rank=1 ;;
+              failure) icon="❌ fail" ; rank=0 ;;
+              *)       icon="⚠️ $outcome" ; rank=0 ;;
+            esac
+            [ "$optional" = "true" ] && tier="optional" || tier="required"
+            printf '%s\t| `%s` | %s | %s |\n' "$rank" "$name" "$icon" "$tier"
+          done | sort -k1,1n -k3 | cut -f2- >> report.md
+
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- machine-bootstrap-ci -->';
+            const body = marker + '\n' + fs.readFileSync('report.md', 'utf8');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
