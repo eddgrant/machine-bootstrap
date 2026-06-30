@@ -295,16 +295,12 @@ EOF
 
 create_zsh_function "install_dropbox" << 'EOF'
 install_dropbox () {
-  # Install with 'apt install <local .deb>' rather than 'dpkg -i' so apt resolves
-  # the package's dependencies (GTK/Pango GObject-introspection, python3-gpg, ...)
-  # from the repos automatically. dpkg -i installs only this one package and
-  # leaves any missing dependencies unconfigured.
-  local dropbox_file="dropbox_2020.03.04_amd64.deb"
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  download_file "https://www.dropbox.com/download?dl=packages/ubuntu/${dropbox_file}" "${tmp_dir}/${dropbox_file}"
-  sudo apt install -y "${tmp_dir}/${dropbox_file}"
-  rm -rf "${tmp_dir}"
+  # nautilus-dropbox (from Ubuntu's universe repo) is the maintained, apt-managed
+  # way to install Dropbox: it integrates with the file manager and fetches
+  # Dropbox's proprietary daemon on first launch. It replaces the old hand-pinned
+  # .deb, whose 2020 build hard-codes a dependency (libpango1.0-0) that no longer
+  # exists on current Ubuntu, making it uninstallable on 24.04.
+  sudo apt install -y nautilus-dropbox
 }
 
 install_dropbox "$@"
