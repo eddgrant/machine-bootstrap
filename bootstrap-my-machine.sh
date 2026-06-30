@@ -295,12 +295,15 @@ EOF
 
 create_zsh_function "install_dropbox" << 'EOF'
 install_dropbox () {
-  sudo apt install -y libpango-1.0-0 python3-gpg
+  # Install with 'apt install <local .deb>' rather than 'dpkg -i' so apt resolves
+  # the package's dependencies (GTK/Pango GObject-introspection, python3-gpg, ...)
+  # from the repos automatically. dpkg -i installs only this one package and
+  # leaves any missing dependencies unconfigured.
   local dropbox_file="dropbox_2020.03.04_amd64.deb"
   local tmp_dir
   tmp_dir="$(mktemp -d)"
   download_file "https://www.dropbox.com/download?dl=packages/ubuntu/${dropbox_file}" "${tmp_dir}/${dropbox_file}"
-  sudo dpkg -i "${tmp_dir}/${dropbox_file}"
+  sudo apt install -y "${tmp_dir}/${dropbox_file}"
   rm -rf "${tmp_dir}"
 }
 
