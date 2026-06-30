@@ -675,15 +675,6 @@ install_yq () {
 install_yq "$@"
 EOF
 
-create_zsh_function "install_nvm" << 'EOF'
-install_nvm () {
-  local version="v0.39.3"
-  curl -o- "https://raw.githubusercontent.com/nvm-sh/nvm/${version}/install.sh" | bash
-}
-
-install_nvm "$@"
-EOF
-
 create_zsh_function "install_rust" << 'EOF'
 install_rust () {
   # Install the Rust toolchain via rustup. --no-modify-path because PATH is
