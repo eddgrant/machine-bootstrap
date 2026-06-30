@@ -28,7 +28,6 @@ OPTIONAL=(
   install_postman        # snap; large download, occasionally flaky
   install_yq             # snap
   install_slack          # scrapes Slack's download page for the current .deb URL
-  install_dropbox        # pinned 2020 .deb; the URL may 404
   install_beyond_compare # pinned old .deb; the URL may 404
   install_wispr_flow     # unofficial third-party apt repository
   install_cruft          # pip3 into a PEP-668 externally-managed system Python
