@@ -198,6 +198,21 @@ clone_or_pull () {
 clone_or_pull "$@"
 EOF
 
+create_zsh_function "latest_github_release_tag" << 'EOF'
+latest_github_release_tag () {
+  # Print a GitHub repo's latest release tag (e.g. "v0.19.0"). Resolved via the
+  # releases/latest web redirect, which lands on .../releases/tag/<tag> - so no
+  # API token, no rate limit, and no jq needed.
+  #   latest_github_release_tag <owner/repo>
+  local repo="$1"
+  local resolved
+  resolved="$(curl -fsSLo /dev/null -w '%{url_effective}' "https://github.com/${repo}/releases/latest")"
+  basename "${resolved}"
+}
+
+latest_github_release_tag "$@"
+EOF
+
 create_zsh_function "install_github_cli" << 'EOF'
 install_github_cli () {
   # Install GitHub CLI - https://github.com/cli/cli/blob/trunk/docs/install_linux.md
@@ -257,19 +272,29 @@ EOF
 
 create_zsh_function "install_asdf" << 'EOF'
 install_asdf () {
-  ASDF_DIR="$HOME/.asdf"
-  ASDF_VERSION="v0.16.7"
-  ASDF_VERSIONED_FILE="asdf-${ASDF_VERSION}-linux-amd64.tar.gz"
-  ASDF_MD5_FILE="${ASDF_VERSIONED_FILE}.md5"
-  ASDF_BINARY_PATH="${ASDF_DIR}/asdf"
+  local ASDF_DIR="$HOME/.asdf"
 
-  mkdir -p "${ASDF_DIR}"
-  local tmp_dir
-  tmp_dir="$(mktemp -d)"
-  download_file "https://github.com/asdf-vm/asdf/releases/download/${ASDF_VERSION}/${ASDF_VERSIONED_FILE}" "${tmp_dir}/${ASDF_VERSIONED_FILE}"
-  tar -xvzf "${tmp_dir}/${ASDF_VERSIONED_FILE}" --directory "${ASDF_DIR}"
-  chmod 0755 "${ASDF_DIR}/asdf"
-  rm -rf "${tmp_dir}"
+  # Resolve the latest asdf release and (re)install the binary only when it
+  # differs from what's already there.
+  local latest_tag latest_version installed_version
+  latest_tag="$(latest_github_release_tag asdf-vm/asdf)"
+  latest_version="${latest_tag#v}"
+  installed_version="$("${ASDF_DIR}/asdf" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+
+  if [ "${installed_version}" = "${latest_version}" ]; then
+    echo "asdf ${installed_version} is already the latest version."
+  else
+    local versioned_file="asdf-${latest_tag}-linux-amd64.tar.gz"
+    mkdir -p "${ASDF_DIR}"
+    local tmp_dir
+    tmp_dir="$(mktemp -d)"
+    download_file "https://github.com/asdf-vm/asdf/releases/download/${latest_tag}/${versioned_file}" "${tmp_dir}/${versioned_file}"
+    tar -xzf "${tmp_dir}/${versioned_file}" --directory "${ASDF_DIR}"
+    chmod 0755 "${ASDF_DIR}/asdf"
+    rm -rf "${tmp_dir}"
+    echo "Installed asdf ${latest_version}${installed_version:+ (was ${installed_version})}."
+  fi
+
   echo 'export PATH="$HOME/.asdf:$PATH"' > ~/.zshrc.d/asdf.zsh
   # ~/.zshrc.d/asdf.zsh only takes effect in future shells; put asdf on PATH now
   # so the plugin adds below work on a fresh machine (this very run).
@@ -722,12 +747,27 @@ create_zsh_function "install_jetbrains_toolbox" << 'EOF'
 install_jetbrains_toolbox () {
   # Install Jetbrains toobox - https://www.jetbrains.com/help/idea/installation-guide.html#fe5cb000
   sudo apt install -y libfuse-dev
-  local version="2.0.5.17700"
-  local toolbox_file="jetbrains-toolbox-${version}.tar.gz"
+
+  # Resolve the current Toolbox build from JetBrains' releases feed (the old
+  # pinned version went stale). Toolbox self-updates after the first install, so
+  # we always fetch the latest for the initial install rather than version-
+  # comparing - there's no clean installed-version query for the AppImage anyway.
+  local releases_url="https://data.services.jetbrains.com/products/releases?code=TBA&latest=true&type=release"
+  local download_url
+  download_url="$(curl -fsSL "${releases_url}" \
+    | grep -oE 'https://download\.jetbrains\.com/toolbox/jetbrains-toolbox-[0-9.]+\.tar\.gz' \
+    | head -1)"
+  if [ -z "${download_url}" ]; then
+    echo "install_jetbrains_toolbox: could not determine the latest Toolbox download from ${releases_url}" >&2
+    return 1
+  fi
+
+  local toolbox_file
+  toolbox_file="$(basename "${download_url}")"
   local tmp_dir
   tmp_dir="$(mktemp -d)"
-  download_file "https://download.jetbrains.com/toolbox/${toolbox_file}" "${tmp_dir}/${toolbox_file}"
-  tar -xvzf "${tmp_dir}/${toolbox_file}" --directory "${tmp_dir}"
+  download_file "${download_url}" "${tmp_dir}/${toolbox_file}"
+  tar -xzf "${tmp_dir}/${toolbox_file}" --directory "${tmp_dir}"
   "${tmp_dir}/${toolbox_file%.tar.gz}/jetbrains-toolbox"
   cat << EHEREDOC > ~/.zshrc.d/jetbrains-toolbox.zsh
 export PATH="\$HOME/.local/share/JetBrains/Toolbox/scripts:\${PATH}"
@@ -783,9 +823,23 @@ EOF
 
 create_zsh_function "install_akamai_cli" << 'EOF'
 install_akamai_cli () {
-  AKAMAI_CLI_VERSION="v1.6.0"
-  download_file "https://github.com/akamai/cli/releases/download/${AKAMAI_CLI_VERSION}/akamai-${AKAMAI_CLI_VERSION}-linuxamd64" "${HOME}/.local/bin/akamai"
-  chmod +x "${HOME}/.local/bin/akamai"
+  local binary_path="${HOME}/.local/bin/akamai"
+
+  # Resolve the latest Akamai CLI release and only download when it differs from
+  # the installed binary's version.
+  local latest_tag latest_version installed_version
+  latest_tag="$(latest_github_release_tag akamai/cli)"
+  latest_version="${latest_tag#v}"
+  installed_version="$("${binary_path}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+
+  if [ "${installed_version}" = "${latest_version}" ]; then
+    echo "Akamai CLI ${installed_version} is already the latest version."
+    return 0
+  fi
+
+  download_file "https://github.com/akamai/cli/releases/download/${latest_tag}/akamai-${latest_tag}-linuxamd64" "${binary_path}"
+  chmod +x "${binary_path}"
+  echo "Installed Akamai CLI ${latest_version}${installed_version:+ (was ${installed_version})}."
 }
 
 install_akamai_cli "$@"
