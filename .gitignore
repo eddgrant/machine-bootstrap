@@ -1,0 +1,10 @@
+# Editors / IDEs
+.idea/
+.vscode/
+*.swp
+
+# OS cruft
+.DS_Store
+
+# CI scratch (results are uploaded as artifacts, never committed)
+results/
