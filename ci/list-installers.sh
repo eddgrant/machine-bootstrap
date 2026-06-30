@@ -43,16 +43,16 @@ mapfile -t all < <(
     | sort -u
 )
 
-contains() { # contains <needle> <haystack...>
-  local needle="$1"; shift
-  local item
-  for item in "$@"; do [ "$item" = "$needle" ] && return 0; done
+is_in_list() { # is_in_list <value> <list-element...>
+  local value="$1"; shift
+  local list_element
+  for list_element in "$@"; do [ "$list_element" = "$value" ] && return 0; done
   return 1
 }
 
 included=()
 for fn in "${all[@]}"; do
-  contains "$fn" "${EXCLUDE[@]}" && continue
+  is_in_list "$fn" "${EXCLUDE[@]}" && continue
   included+=("$fn")
 done
 
@@ -63,7 +63,7 @@ case "$mode" in
   matrix)
     json=""
     for fn in "${included[@]}"; do
-      if contains "$fn" "${OPTIONAL[@]}"; then optional=true; else optional=false; fi
+      if is_in_list "$fn" "${OPTIONAL[@]}"; then optional=true; else optional=false; fi
       json+="{\"name\":\"${fn}\",\"optional\":${optional}},"
     done
     printf '[%s]\n' "${json%,}"
