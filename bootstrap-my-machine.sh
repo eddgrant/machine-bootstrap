@@ -300,6 +300,17 @@ install_dropbox () {
   # Dropbox's proprietary daemon on first launch. It replaces the old hand-pinned
   # .deb, whose 2020 build hard-codes a dependency (libpango1.0-0) that no longer
   # exists on current Ubuntu, making it uninstallable on 24.04.
+
+  # Migrate a machine that installed the old standalone 'dropbox' .deb: remove it
+  # first so it doesn't coexist with (and shadow) nautilus-dropbox. Guarded with
+  # dpkg-query so this is a no-op on a machine that never had it - a bare
+  # 'apt-get remove dropbox' would error there, since that package came from a
+  # manual .deb and apt no longer knows the name once it's gone.
+  if dpkg-query -W -f='${Status}' dropbox 2>/dev/null | grep -q 'install ok installed'; then
+    echo "Removing the old standalone 'dropbox' package before migrating to nautilus-dropbox."
+    sudo apt-get remove -y dropbox
+  fi
+
   sudo apt install -y nautilus-dropbox
 }
 
