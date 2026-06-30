@@ -271,6 +271,9 @@ install_asdf () {
   chmod 0755 "${ASDF_DIR}/asdf"
   rm -rf "${tmp_dir}"
   echo 'export PATH="$HOME/.asdf:$PATH"' > ~/.zshrc.d/asdf.zsh
+  # ~/.zshrc.d/asdf.zsh only takes effect in future shells; put asdf on PATH now
+  # so the plugin adds below work on a fresh machine (this very run).
+  export PATH="${ASDF_DIR}:$PATH"
 
   echo "Don't forget to add asdf to your oh-my-zsh plugins"
 
@@ -292,7 +295,7 @@ EOF
 
 create_zsh_function "install_dropbox" << 'EOF'
 install_dropbox () {
-  sudo apt install -y libpango1.0-0 python3-gpg
+  sudo apt install -y libpango-1.0-0 python3-gpg
   local dropbox_file="dropbox_2020.03.04_amd64.deb"
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -336,14 +339,6 @@ install_keepassxc () {
 }
 
 install_keepassxc "$@"
-EOF
-
-create_zsh_function "install_authy" << 'EOF'
-install_authy () {
-  sudo snap install authy
-}
-
-install_authy "$@"
 EOF
 
 create_zsh_function "install_1password" << 'EOF'
@@ -402,8 +397,14 @@ install_aws_cli () {
   local tmp_dir
   tmp_dir="$(mktemp -d)"
   curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "${tmp_dir}/awscliv2.zip"
-  unzip -d "${tmp_dir}" "${tmp_dir}/awscliv2.zip"
-  sudo "${tmp_dir}/aws/install"
+  unzip -q -d "${tmp_dir}" "${tmp_dir}/awscliv2.zip"
+  # The bundled installer refuses to overwrite an existing install unless given
+  # --update, so re-running (or a runner with the AWS CLI preinstalled) needs it.
+  if command -v aws >/dev/null 2>&1 || [ -d /usr/local/aws-cli ]; then
+    sudo "${tmp_dir}/aws/install" --update
+  else
+    sudo "${tmp_dir}/aws/install"
+  fi
   rm -rf "${tmp_dir}"
 }
 
@@ -416,8 +417,13 @@ install_aws_sam_cli () {
   local tmp_dir
   tmp_dir="$(mktemp -d)"
   download_file "https://github.com/aws/aws-sam-cli/releases/latest/download/${sam_file}" "${tmp_dir}/${sam_file}"
-  unzip -d "${tmp_dir}/sam-installation" "${tmp_dir}/${sam_file}"
-  sudo "${tmp_dir}/sam-installation/install"
+  unzip -q -d "${tmp_dir}/sam-installation" "${tmp_dir}/${sam_file}"
+  # As with the AWS CLI, the installer needs --update when one already exists.
+  if command -v sam >/dev/null 2>&1 || [ -d /usr/local/aws-sam-cli ]; then
+    sudo "${tmp_dir}/sam-installation/install" --update
+  else
+    sudo "${tmp_dir}/sam-installation/install"
+  fi
   rm -rf "${tmp_dir}"
 }
 
@@ -542,10 +548,35 @@ EOF
 
 create_zsh_function "install_beyond_compare" << 'EOF'
 install_beyond_compare () {
-  local version="4.4.4.27058"
-  local deb_file="bcompare-${version}_amd64.deb"
+  # Beyond Compare has no apt repo. Their download page always advertises the
+  # current build, so scrape the version from it, compare against what's already
+  # installed, and only fetch + install when it differs - mirroring how
+  # install_1password stays idempotent.
+  local download_page="https://www.scootersoftware.com/download"
+  local deb_file
+  deb_file="$(curl -fsSL "${download_page}" \
+              | grep -oE 'bcompare-[0-9.]+_amd64\.deb' \
+              | sort -V | tail -1)"
+  if [ -z "${deb_file}" ]; then
+    echo "install_beyond_compare: could not determine the latest version from ${download_page}" >&2
+    return 1
+  fi
+
+  local latest_version="${deb_file#bcompare-}"
+  latest_version="${latest_version%_amd64.deb}"
+
+  local installed_version
+  installed_version="$(dpkg-query --showformat='${Version}' --show bcompare 2>/dev/null || true)"
+  if [ "${installed_version}" = "${latest_version}" ]; then
+    echo "Beyond Compare ${installed_version} is already the latest version - nothing to do."
+    return 0
+  fi
+
+  echo "Installing Beyond Compare ${latest_version}${installed_version:+ (replacing ${installed_version})}."
   local tmp_dir
   tmp_dir="$(mktemp -d)"
+  # The page links the file under /files/, but the actual download is served
+  # from the host root.
   download_file "https://www.scootersoftware.com/${deb_file}" "${tmp_dir}/${deb_file}"
   sudo apt update
   sudo apt install -y "${tmp_dir}/${deb_file}"
@@ -587,7 +618,9 @@ EHEREDOC
   # Install packages required by PyEnv to build Python distributions
   # https://github.com/pyenv/pyenv/wiki/Common-build-problems
   sudo apt install -y zlib1g zlib1g-dev libssl-dev libbz2-dev libsqlite3-dev libffi-dev
-  sudo apt install -y libncursesw5 libreadline-dev tk-dev liblzma-dev
+  # libncursesw5 was dropped in Ubuntu 24.04; libncurses-dev provides the wide
+  # headers pyenv needs to build CPython.
+  sudo apt install -y libncurses-dev libreadline-dev tk-dev liblzma-dev
 }
 
 install_pyenv "$@"
@@ -624,7 +657,6 @@ create_zsh_function "install_rbenv" << 'EOF'
 install_rbenv () {
   clone_or_pull https://github.com/rbenv/rbenv.git ~/.rbenv
   echo 'eval "$(~/.rbenv/bin/rbenv init - zsh)"' >> ~/.zshrc.d/rbenv.zsh
-  rbenv
 
   # Install ruby-build as RBEnv install command
   eval "$(~/.rbenv/bin/rbenv init - zsh)" # Init rbenv so the "root" command below works.
@@ -649,7 +681,7 @@ EOF
 
 create_zsh_function "install_yq" << 'EOF'
 install_yq () {
-  snap install yq
+  sudo snap install yq
 }
 
 install_yq "$@"
