@@ -25,7 +25,6 @@ EXCLUDE=(
 )
 
 OPTIONAL=(
-  install_authy          # snap; the Authy desktop app has been discontinued
   install_postman        # snap; large download, occasionally flaky
   install_yq             # snap
   install_slack          # scrapes Slack's download page for the current .deb URL
