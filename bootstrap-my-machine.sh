@@ -60,9 +60,24 @@ sudo -v
 # git is part of the bootstrap (not an optional install_* function) because the
 # oh-my-zsh installer and the zshrc.d plugin are cloned with git, as are several
 # install_* functions via clone_or_pull. Ubuntu's own git (2.53+) is current
-# enough now, so we no longer add the git-core PPA. (If the PPA is still
-# configured from a previous run you can remove it manually.)
+# enough now, so we no longer add the git-core PPA.
 # ---------------------------------------------------------------------------
+
+# Remove the retired git-core PPA if a previous run added it. add-apt-repository
+# writes a git-core-ubuntu-ppa-<codename>.sources (older releases used a .list),
+# so glob both; the codename varies per machine. Left in place it keeps hitting
+# the PPA on every apt update. nullglob so the loop is a clean no-op when absent.
+info "Removing the retired git-core PPA if present"
+shopt -s nullglob
+git_core_ppa_files=(/etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources \
+                    /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.list)
+shopt -u nullglob
+if [ "${#git_core_ppa_files[@]}" -gt 0 ]; then
+  run_step "Removing stale git-core PPA source(s)" sudo rm -f "${git_core_ppa_files[@]}" \
+    || warn "could not remove git-core PPA source(s) - remove them manually if apt keeps hitting the PPA"
+else
+  ok "No git-core PPA source configured"
+fi
 
 # Install git. A flaky mirror shouldn't abort the whole bootstrap, so apt update
 # failures are tolerated (apt falls back to cached package lists anyway).
@@ -270,6 +285,34 @@ install_brave_browser () {
 install_brave_browser "$@"
 EOF
 
+create_zsh_function "install_claude_desktop" << 'EOF'
+install_claude_desktop () {
+  # Install the Claude desktop app (Linux beta) from Anthropic's apt repository,
+  # so updates arrive with regular system package updates.
+  # https://code.claude.com/docs/en/desktop-linux
+  #
+  # Anthropic serves an armoured key, but add_signed_apt_repository dearmors it
+  # to a .gpg keyring and points signed-by at that - apt is happy either way.
+  # The repo publishes both amd64 and arm64, so we advertise both arches.
+  add_signed_apt_repository "claude-desktop" \
+    "https://downloads.claude.ai/claude-desktop/key.asc" \
+    "deb [arch=amd64,arm64 signed-by=KEYRING] https://downloads.claude.ai/claude-desktop/apt/stable stable main"
+  sudo apt install -y claude-desktop
+
+  # The app uses hardware virtualization (/dev/kvm), which is root-only unless
+  # the user is in the 'kvm' group. usermod -aG is idempotent. Takes effect on
+  # the next login, so warn if we've only just added the membership.
+  if id -nG "$USER" | grep -qw kvm; then
+    echo "User '$USER' is already in the 'kvm' group."
+  else
+    sudo usermod -aG kvm "$USER"
+    echo "Added '$USER' to the 'kvm' group. Log out and back in for virtualization to work."
+  fi
+}
+
+install_claude_desktop "$@"
+EOF
+
 create_zsh_function "install_asdf" << 'EOF'
 install_asdf () {
   local ASDF_DIR="$HOME/.asdf"
@@ -406,9 +449,15 @@ install_1password () {
   # Import the signing key. --yes lets gpg overwrite the keyring on re-runs.
   curl -sS "${key_url}" | sudo gpg --dearmor --yes --output "${keyring}"
 
-  # Add the apt repository (tee overwrites the list in place on re-runs).
-  echo "deb [arch=${arch} signed-by=${keyring}] https://downloads.1password.com/linux/debian/${arch} stable main" \
-    | sudo tee /etc/apt/sources.list.d/1password.list > /dev/null
+  # Add the apt repository, but only to BOOTSTRAP the first install. The
+  # 1password package ships its own deb822 source (1password.sources); once that
+  # exists our hand-written .list is a duplicate and makes apt warn that every
+  # target is "configured multiple times". So only write the .list when the
+  # package's .sources isn't there yet (i.e. 1Password has never been installed).
+  if [ ! -f /etc/apt/sources.list.d/1password.sources ]; then
+    echo "deb [arch=${arch} signed-by=${keyring}] https://downloads.1password.com/linux/debian/${arch} stable main" \
+      | sudo tee /etc/apt/sources.list.d/1password.list > /dev/null
+  fi
 
   # Configure the debsig-verify policy so the package signature can be verified.
   sudo mkdir -p "/etc/debsig/policies/${debsig_id}/"
@@ -433,6 +482,12 @@ install_1password () {
   else
     echo "A newer version of 1Password is available: ${installed_version} -> ${candidate_version}. Upgrading."
     sudo apt install -y 1password
+  fi
+
+  # Once the package has dropped its own 1password.sources, our bootstrap .list
+  # is redundant and causes the "configured multiple times" warnings. Remove it.
+  if [ -f /etc/apt/sources.list.d/1password.sources ] && [ -f /etc/apt/sources.list.d/1password.list ]; then
+    sudo rm -f /etc/apt/sources.list.d/1password.list
   fi
 }
 
