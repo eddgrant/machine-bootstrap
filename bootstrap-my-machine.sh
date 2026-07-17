@@ -434,7 +434,10 @@ EOF
 
 create_zsh_function "install_1password" << 'EOF'
 install_1password () {
-  # Install the 1Password desktop app - https://support.1password.com/install-linux/
+  # Install the 1Password desktop app AND the `op` CLI - https://support.1password.com/install-linux/
+  # Both ship from the same apt repository (packages '1password' and
+  # '1password-cli'), so the key import, apt source and debsig policy below are
+  # set up once and shared; only the install/upgrade decision is made per package.
   # Idempotent: re-running refreshes the repo metadata and only installs when a
   # newer version is available (apt itself is a no-op if already up to date, but
   # we report the decision explicitly first).
@@ -466,23 +469,29 @@ install_1password () {
   sudo mkdir -p "/usr/share/debsig/keyrings/${debsig_id}"
   curl -sS "${key_url}" | sudo gpg --dearmor --yes --output "/usr/share/debsig/keyrings/${debsig_id}/debsig.gpg"
 
-  # Refresh package lists so apt sees the current candidate version.
+  # Refresh package lists so apt sees the current candidate versions.
   sudo apt update
 
-  # Compare the installed version against the candidate the repo now offers.
-  local installed_version candidate_version
-  installed_version="$(dpkg-query --showformat='${Version}' --show 1password 2>/dev/null || true)"
-  candidate_version="$(apt-cache policy 1password | awk '/Candidate:/ {print $2}')"
+  # Install (or upgrade) both packages from the repo configured above:
+  #   1password      - the desktop app
+  #   1password-cli  - the `op` command-line tool
+  # For each, compare the installed version against the candidate the repo now
+  # offers and only apt install when it's missing or out of date.
+  local pkg installed_version candidate_version
+  for pkg in 1password 1password-cli; do
+    installed_version="$(dpkg-query --showformat='${Version}' --show "${pkg}" 2>/dev/null || true)"
+    candidate_version="$(apt-cache policy "${pkg}" | awk '/Candidate:/ {print $2}')"
 
-  if [ -z "${installed_version}" ]; then
-    echo "1Password is not installed. Installing version ${candidate_version}."
-    sudo apt install -y 1password
-  elif [ "${installed_version}" = "${candidate_version}" ]; then
-    echo "1Password ${installed_version} is already the latest version - nothing to do."
-  else
-    echo "A newer version of 1Password is available: ${installed_version} -> ${candidate_version}. Upgrading."
-    sudo apt install -y 1password
-  fi
+    if [ -z "${installed_version}" ]; then
+      echo "${pkg} is not installed. Installing version ${candidate_version}."
+      sudo apt install -y "${pkg}"
+    elif [ "${installed_version}" = "${candidate_version}" ]; then
+      echo "${pkg} ${installed_version} is already the latest version - nothing to do."
+    else
+      echo "A newer version of ${pkg} is available: ${installed_version} -> ${candidate_version}. Upgrading."
+      sudo apt install -y "${pkg}"
+    fi
+  done
 
   # Once the package has dropped its own 1password.sources, our bootstrap .list
   # is redundant and causes the "configured multiple times" warnings. Remove it.
