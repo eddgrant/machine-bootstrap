@@ -44,10 +44,84 @@ run_step() {
 # Reprint the log location if we abort partway through.
 trap 'rc=$?; if [ "${rc}" -ne 0 ]; then printf "\n%sBootstrap aborted (exit %s). Full log: %s%s\n" "${C_YELLOW}" "${rc}" "${LOG_FILE}" "${C_RESET}"; fi' EXIT
 
-# We use sudo throughout; prompt for it once up front so the password prompt
-# isn't hidden inside a redirected step (which would look like a silent hang).
-info "This bootstrap needs sudo for system package installs."
-sudo -v
+# ---------------------------------------------------------------------------
+# Privilege escalation
+#
+# Every root-needing command goes through run_privileged rather than calling sudo
+# directly, so the bootstrap also works from an account that has no sudo rights
+# (a standard daily-driver user, with a separate admin account for changes).
+#
+# Mode, chosen per call:
+#   root  - already uid 0: run the command directly.
+#   sudo  - the user is in the sudo/admin/wheel group: sudo <command>.
+#   su    - otherwise: su to an admin account, which runs sudo <command>. The admin
+#           username is NOT stored anywhere: set BOOTSTRAP_ADMIN_USER, or you are
+#           prompted for it. su and sudo then ask for the admin's password.
+# Override the choice with BOOTSTRAP_PRIVILEGE=sudo|su (CI does this).
+#
+# The function is written in the common subset of bash and zsh because the same
+# source is used here and written out as an autoloaded zsh function (below), for
+# the install_* functions to call long after this script has exited.
+# ---------------------------------------------------------------------------
+RUN_PRIVILEGED_SRC=$(cat << 'EOF'
+run_privileged () {
+  # run_privileged <command> [args...]   (stdin/stdout pass through, so it works
+  # in pipelines such as: curl ... | run_privileged gpg --dearmor ...)
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return
+  fi
+
+  local mode="${BOOTSTRAP_PRIVILEGE:-}"
+  if [ -z "${mode}" ]; then
+    # Group membership, not 'sudo -n true': probing sudo as a non-sudoer would
+    # write a failed-attempt entry to the auth log on every run.
+    case " $(id -nG) " in
+      *" sudo "*|*" admin "*|*" wheel "*) mode=sudo ;;
+      *) mode=su ;;
+    esac
+  fi
+
+  case "${mode}" in
+    sudo)
+      sudo -- "$@"
+      ;;
+    su)
+      if [ -z "${BOOTSTRAP_ADMIN_USER:-}" ]; then
+        # Probe by opening /dev/tty: it exists as a file even with no terminal.
+        if ! { : < /dev/tty; } 2> /dev/null; then
+          echo "run_privileged: no sudo access and no terminal to ask for an admin account; set BOOTSTRAP_ADMIN_USER" >&2
+          return 1
+        fi
+        printf 'This account has no sudo access. Admin account to use: ' > /dev/tty
+        read -r BOOTSTRAP_ADMIN_USER < /dev/tty
+        export BOOTSTRAP_ADMIN_USER
+      fi
+      if ! id -u "${BOOTSTRAP_ADMIN_USER}" > /dev/null 2>&1; then
+        echo "run_privileged: no such user '${BOOTSTRAP_ADMIN_USER}'" >&2
+        unset BOOTSTRAP_ADMIN_USER
+        return 1
+      fi
+      # Arguments travel as positional parameters ("$@") rather than being spliced
+      # into a command string, so no quoting of the command is needed. 'sh' fills
+      # $0. '--' stops su treating the command's own flags as su options.
+      su -s /bin/sh -c 'exec sudo -- "$@"' -- "${BOOTSTRAP_ADMIN_USER}" sh "$@"
+      ;;
+    *)
+      echo "run_privileged: unknown BOOTSTRAP_PRIVILEGE '${mode}' (expected sudo or su)" >&2
+      return 1
+      ;;
+  esac
+}
+EOF
+)
+eval "${RUN_PRIVILEGED_SRC}"
+
+# Authenticate once up front so the password prompts aren't hidden inside a
+# redirected step (which would look like a silent hang). In su mode this also asks
+# for the admin username and primes the admin's sudo timestamp for later calls.
+info "This bootstrap needs elevated privileges for system package installs."
+run_privileged true
 
 # ---------------------------------------------------------------------------
 # Framework bootstrap
@@ -73,7 +147,7 @@ git_core_ppa_files=(/etc/apt/sources.list.d/git-core-ubuntu-ppa-*.sources \
                     /etc/apt/sources.list.d/git-core-ubuntu-ppa-*.list)
 shopt -u nullglob
 if [ "${#git_core_ppa_files[@]}" -gt 0 ]; then
-  run_step "Removing stale git-core PPA source(s)" sudo rm -f "${git_core_ppa_files[@]}" \
+  run_step "Removing stale git-core PPA source(s)" run_privileged rm -f "${git_core_ppa_files[@]}" \
     || warn "could not remove git-core PPA source(s) - remove them manually if apt keeps hitting the PPA"
 else
   ok "No git-core PPA source configured"
@@ -81,19 +155,19 @@ fi
 
 # Install git. A flaky mirror shouldn't abort the whole bootstrap, so apt update
 # failures are tolerated (apt falls back to cached package lists anyway).
-run_step "Refreshing apt package lists" sudo apt-get update \
+run_step "Refreshing apt package lists" run_privileged apt-get update \
   || warn "apt update reported errors (often a transient mirror sync) - continuing with cached package lists"
-run_step "Installing git" sudo apt-get install -y git
+run_step "Installing git" run_privileged apt-get install -y git
 
 # Install zsh
-run_step "Installing zsh" sudo apt-get install -y zsh
+run_step "Installing zsh" run_privileged apt-get install -y zsh
 
 # Install oh-my-zsh
 if [ ! -d ~/.oh-my-zsh ]; then
   run_step "Installing oh-my-zsh" sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
-  # sudo chsh uses the cached sudo credentials rather than prompting for the
-  # user's password mid-run (which the log redirection would hide).
-  run_step "Setting zsh as the default shell" sudo chsh -s "$(command -v zsh)" "$USER"
+  # run_privileged reuses the credentials cached by the up-front authentication
+  # rather than prompting mid-run (which the log redirection would hide).
+  run_step "Setting zsh as the default shell" run_privileged chsh -s "$(command -v zsh)" "$USER"
 else
   ok "oh-my-zsh already installed"
 fi
@@ -184,9 +258,9 @@ add_signed_apt_repository () {
   # Idempotent: gpg --yes overwrites the keyring and tee overwrites the .list.
   local name="$1" key_url="$2" repo_line="$3"
   local keyring="/usr/share/keyrings/${name}-archive-keyring.gpg"
-  curl -fsSL "${key_url}" | sudo gpg --dearmor --yes -o "${keyring}"
-  echo "${repo_line//KEYRING/${keyring}}" | sudo tee "/etc/apt/sources.list.d/${name}.list" > /dev/null
-  sudo apt update
+  curl -fsSL "${key_url}" | run_privileged gpg --dearmor --yes -o "${keyring}"
+  echo "${repo_line//KEYRING/${keyring}}" | run_privileged tee "/etc/apt/sources.list.d/${name}.list" > /dev/null
+  run_privileged apt update
 }
 
 add_signed_apt_repository "$@"
@@ -213,6 +287,17 @@ clone_or_pull () {
 clone_or_pull "$@"
 EOF
 
+# run_privileged is defined in the bootstrap body above (used for the framework
+# setup). The install_* functions call it at runtime, so write it out as an
+# autoloaded function too - from the same source, so the two cannot drift. The
+# heredoc is unquoted so ${RUN_PRIVILEGED_SRC} expands; its value is not
+# re-expanded, and the trailing call's "$@" is escaped to survive.
+create_zsh_function "run_privileged" << EOF
+${RUN_PRIVILEGED_SRC}
+
+run_privileged "\$@"
+EOF
+
 create_zsh_function "latest_github_release_tag" << 'EOF'
 latest_github_release_tag () {
   # Print a GitHub repo's latest release tag (e.g. "v0.19.0"). Resolved via the
@@ -233,11 +318,11 @@ install_github_cli () {
   # Install GitHub CLI - https://github.com/cli/cli/blob/trunk/docs/install_linux.md
   # The gh package Depends on git, so apt pulls git in regardless; git is also
   # part of the machine bootstrap.
-  type -p curl >/dev/null || sudo apt install curl -y
+  type -p curl >/dev/null || run_privileged apt install curl -y
   add_signed_apt_repository "githubcli" \
     "https://cli.github.com/packages/githubcli-archive-keyring.gpg" \
     "deb [arch=$(dpkg --print-architecture) signed-by=KEYRING] https://cli.github.com/packages stable main"
-  sudo apt install gh -y
+  run_privileged apt install gh -y
 }
 
 install_github_cli "$@"
@@ -245,7 +330,7 @@ EOF
 
 create_zsh_function "install_gnome_tweaks" << 'EOF'
 install_gnome_tweaks () {
-  sudo apt install -y gnome-tweaks
+  run_privileged apt install -y gnome-tweaks
 }
 
 install_gnome_tweaks "$@"
@@ -253,7 +338,7 @@ EOF
 
 create_zsh_function "install_gnome_extensions" << 'EOF'
 install_gnome_extensions () {
-  sudo apt install -y chrome-gnome-shell gnome-shell-extensions
+  run_privileged apt install -y chrome-gnome-shell gnome-shell-extensions
 }
 
 install_gnome_extensions "$@"
@@ -267,7 +352,7 @@ install_zoom () {
   local tmp_dir
   tmp_dir="$(mktemp -d)"
   download_file "https://zoom.us/client/latest/zoom_amd64.deb" "${tmp_dir}/${zoom_file}"
-  sudo apt install -y "${tmp_dir}/${zoom_file}"
+  run_privileged apt install -y "${tmp_dir}/${zoom_file}"
   rm -rf "${tmp_dir}"
 }
 
@@ -279,7 +364,7 @@ install_brave_browser () {
   add_signed_apt_repository "brave-browser" \
     "https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg" \
     "deb [arch=amd64 signed-by=KEYRING] https://brave-browser-apt-release.s3.brave.com/ stable main"
-  sudo apt install -y brave-browser
+  run_privileged apt install -y brave-browser
 }
 
 install_brave_browser "$@"
@@ -297,7 +382,7 @@ install_claude_desktop () {
   add_signed_apt_repository "claude-desktop" \
     "https://downloads.claude.ai/claude-desktop/key.asc" \
     "deb [arch=amd64,arm64 signed-by=KEYRING] https://downloads.claude.ai/claude-desktop/apt/stable stable main"
-  sudo apt install -y claude-desktop
+  run_privileged apt install -y claude-desktop
 
   # The app uses hardware virtualization (/dev/kvm), which is root-only unless
   # the user is in the 'kvm' group. usermod -aG is idempotent. Takes effect on
@@ -305,7 +390,7 @@ install_claude_desktop () {
   if id -nG "$USER" | grep -qw kvm; then
     echo "User '$USER' is already in the 'kvm' group."
   else
-    sudo usermod -aG kvm "$USER"
+    run_privileged usermod -aG kvm "$USER"
     echo "Added '$USER' to the 'kvm' group. Log out and back in for virtualization to work."
   fi
 }
@@ -349,7 +434,7 @@ install_asdf () {
   # python-build and rbenv's ruby-build backends, so they need the C toolchain
   # and library headers those builds expect. This is the set that used to live in
   # install_pyenv, plus autoconf/libyaml-dev/libgmp-dev for Ruby.
-  sudo apt install -y \
+  run_privileged apt install -y \
     build-essential autoconf xz-utils tk-dev \
     libssl-dev zlib1g-dev libbz2-dev libreadline-dev libsqlite3-dev \
     libncurses-dev libffi-dev liblzma-dev \
@@ -389,10 +474,10 @@ install_dropbox () {
   # manual .deb and apt no longer knows the name once it's gone.
   if dpkg-query -W -f='${Status}' dropbox 2>/dev/null | grep -q 'install ok installed'; then
     echo "Removing the old standalone 'dropbox' package before migrating to nautilus-dropbox."
-    sudo apt-get remove -y dropbox
+    run_privileged apt-get remove -y dropbox
   fi
 
-  sudo apt install -y nautilus-dropbox
+  run_privileged apt install -y nautilus-dropbox
 }
 
 install_dropbox "$@"
@@ -404,7 +489,7 @@ install_google_chrome () {
   add_signed_apt_repository "google-chrome" \
     "https://dl-ssl.google.com/linux/linux_signing_key.pub" \
     "deb [signed-by=KEYRING arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main"
-  sudo apt install -y google-chrome-stable
+  run_privileged apt install -y google-chrome-stable
 }
 
 install_google_chrome "$@"
@@ -412,8 +497,8 @@ EOF
 
 create_zsh_function "install_flatpak" << 'EOF'
 install_flatpak () {
-  sudo apt install -y flatpak gnome-software-plugin-flatpak
-  sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+  run_privileged apt install -y flatpak gnome-software-plugin-flatpak
+  run_privileged flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 }
 
 install_flatpak "$@"
@@ -424,9 +509,9 @@ install_keepassxc () {
   # Install KeepassXC
   # Flatpak doesn't seem to install correctly at the moment, so use the official PPA.
   #sudo flatpak install -y org.keepassxc.KeePassXC
-  sudo add-apt-repository ppa:phoerious/keepassxc
-  sudo apt update
-  sudo apt install -y keepassxc
+  run_privileged add-apt-repository ppa:phoerious/keepassxc
+  run_privileged apt update
+  run_privileged apt install -y keepassxc
 }
 
 install_keepassxc "$@"
@@ -450,7 +535,7 @@ install_1password () {
   arch="$(dpkg --print-architecture)"
 
   # Import the signing key. --yes lets gpg overwrite the keyring on re-runs.
-  curl -sS "${key_url}" | sudo gpg --dearmor --yes --output "${keyring}"
+  curl -sS "${key_url}" | run_privileged gpg --dearmor --yes --output "${keyring}"
 
   # Add the apt repository, but only to BOOTSTRAP the first install. The
   # 1password package ships its own deb822 source (1password.sources); once that
@@ -459,18 +544,18 @@ install_1password () {
   # package's .sources isn't there yet (i.e. 1Password has never been installed).
   if [ ! -f /etc/apt/sources.list.d/1password.sources ]; then
     echo "deb [arch=${arch} signed-by=${keyring}] https://downloads.1password.com/linux/debian/${arch} stable main" \
-      | sudo tee /etc/apt/sources.list.d/1password.list > /dev/null
+      | run_privileged tee /etc/apt/sources.list.d/1password.list > /dev/null
   fi
 
   # Configure the debsig-verify policy so the package signature can be verified.
-  sudo mkdir -p "/etc/debsig/policies/${debsig_id}/"
+  run_privileged mkdir -p "/etc/debsig/policies/${debsig_id}/"
   curl -sS https://downloads.1password.com/linux/debian/debsig/1password.pol \
-    | sudo tee "/etc/debsig/policies/${debsig_id}/1password.pol" > /dev/null
-  sudo mkdir -p "/usr/share/debsig/keyrings/${debsig_id}"
-  curl -sS "${key_url}" | sudo gpg --dearmor --yes --output "/usr/share/debsig/keyrings/${debsig_id}/debsig.gpg"
+    | run_privileged tee "/etc/debsig/policies/${debsig_id}/1password.pol" > /dev/null
+  run_privileged mkdir -p "/usr/share/debsig/keyrings/${debsig_id}"
+  curl -sS "${key_url}" | run_privileged gpg --dearmor --yes --output "/usr/share/debsig/keyrings/${debsig_id}/debsig.gpg"
 
   # Refresh package lists so apt sees the current candidate versions.
-  sudo apt update
+  run_privileged apt update
 
   # Install (or upgrade) both packages from the repo configured above:
   #   1password      - the desktop app
@@ -484,19 +569,19 @@ install_1password () {
 
     if [ -z "${installed_version}" ]; then
       echo "${pkg} is not installed. Installing version ${candidate_version}."
-      sudo apt install -y "${pkg}"
+      run_privileged apt install -y "${pkg}"
     elif [ "${installed_version}" = "${candidate_version}" ]; then
       echo "${pkg} ${installed_version} is already the latest version - nothing to do."
     else
       echo "A newer version of ${pkg} is available: ${installed_version} -> ${candidate_version}. Upgrading."
-      sudo apt install -y "${pkg}"
+      run_privileged apt install -y "${pkg}"
     fi
   done
 
   # Once the package has dropped its own 1password.sources, our bootstrap .list
   # is redundant and causes the "configured multiple times" warnings. Remove it.
   if [ -f /etc/apt/sources.list.d/1password.sources ] && [ -f /etc/apt/sources.list.d/1password.list ]; then
-    sudo rm -f /etc/apt/sources.list.d/1password.list
+    run_privileged rm -f /etc/apt/sources.list.d/1password.list
   fi
 }
 
@@ -513,9 +598,9 @@ install_aws_cli () {
   # The bundled installer refuses to overwrite an existing install unless given
   # --update, so re-running (or a runner with the AWS CLI preinstalled) needs it.
   if command -v aws >/dev/null 2>&1 || [ -d /usr/local/aws-cli ]; then
-    sudo "${tmp_dir}/aws/install" --update
+    run_privileged "${tmp_dir}/aws/install" --update
   else
-    sudo "${tmp_dir}/aws/install"
+    run_privileged "${tmp_dir}/aws/install"
   fi
   rm -rf "${tmp_dir}"
 }
@@ -532,9 +617,9 @@ install_aws_sam_cli () {
   unzip -q -d "${tmp_dir}/sam-installation" "${tmp_dir}/${sam_file}"
   # As with the AWS CLI, the installer needs --update when one already exists.
   if command -v sam >/dev/null 2>&1 || [ -d /usr/local/aws-sam-cli ]; then
-    sudo "${tmp_dir}/sam-installation/install" --update
+    run_privileged "${tmp_dir}/sam-installation/install" --update
   else
-    sudo "${tmp_dir}/sam-installation/install"
+    run_privileged "${tmp_dir}/sam-installation/install"
   fi
   rm -rf "${tmp_dir}"
 }
@@ -554,8 +639,8 @@ EOF
 
 create_zsh_function "install_aws_vault" << 'EOF'
 install_aws_vault () {
-  sudo curl -L -o /usr/local/bin/aws-vault https://github.com/99designs/aws-vault/releases/latest/download/aws-vault-linux-amd64
-  sudo chmod 755 /usr/local/bin/aws-vault
+  run_privileged curl -L -o /usr/local/bin/aws-vault https://github.com/99designs/aws-vault/releases/latest/download/aws-vault-linux-amd64
+  run_privileged chmod 755 /usr/local/bin/aws-vault
 
   # Install aws-vault Zsh plugin
   clone_or_pull https://github.com/blimmer/zsh-aws-vault.git "${ZSH_CUSTOM}/plugins/zsh-aws-vault"
@@ -568,31 +653,31 @@ EOF
 create_zsh_function "install_docker" << 'EOF'
 install_docker () {
   # Install Docker - https://docs.docker.com/engine/install/ubuntu/
-  sudo apt-get remove -y docker docker.io containerd runc
+  run_privileged apt-get remove -y docker docker.io containerd runc
 
-  sudo apt-get install -y \
+  run_privileged apt-get install -y \
       ca-certificates \
       curl \
       gnupg \
       lsb-release
 
-  sudo mkdir -p /etc/apt/keyrings
+  run_privileged mkdir -p /etc/apt/keyrings
   # --yes so re-runs overwrite the keyring instead of prompting. chmod a+r so
   # apt (running unprivileged) can read it - per Docker's own install docs.
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
-  sudo chmod a+r /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | run_privileged gpg --dearmor --yes -o /etc/apt/keyrings/docker.gpg
+  run_privileged chmod a+r /etc/apt/keyrings/docker.gpg
 
   echo \
     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-    $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+    $(lsb_release -cs) stable" | run_privileged tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-  sudo apt-get update
-  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  run_privileged apt-get update
+  run_privileged apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
   # The post-install group setup. groupadd is guarded so a re-run doesn't error
   # on the already-existing group; usermod -aG is itself idempotent.
-  getent group docker >/dev/null || sudo groupadd docker
-  sudo usermod -aG docker "$USER"
+  getent group docker >/dev/null || run_privileged groupadd docker
+  run_privileged usermod -aG docker "$USER"
 
   # NB: we deliberately do NOT 'newgrp docker' here - it would replace the
   # current shell and silently abort the rest of this function. Pick up the new
@@ -623,7 +708,7 @@ install_slack () {
   local tmp_dir
   tmp_dir="$(mktemp -d)"
   download_file "${deb_url}" "${tmp_dir}/${slack_deb}"
-  sudo apt install -y "${tmp_dir}/${slack_deb}"
+  run_privileged apt install -y "${tmp_dir}/${slack_deb}"
   rm -rf "${tmp_dir}"
   # If the snap is also installed, remove it manually with: sudo snap remove slack
 }
@@ -633,7 +718,7 @@ EOF
 
 create_zsh_function "install_openvpn_client" << 'EOF'
 install_openvpn_client () {
-  sudo apt install -y openvpn unzip network-manager-openvpn-gnome
+  run_privileged apt install -y openvpn unzip network-manager-openvpn-gnome
 }
 
 install_openvpn_client "$@"
@@ -642,17 +727,17 @@ EOF
 create_zsh_function "install_vscode" << 'EOF'
 install_vscode () {
   # Install VSCode - https://code.visualstudio.com/docs/setup/linux
-  sudo apt-get install -y wget gpg
+  run_privileged apt-get install -y wget gpg
   local tmp_dir
   tmp_dir="$(mktemp -d)"
   wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > "${tmp_dir}/packages.microsoft.gpg"
-  sudo install -D -o root -g root -m 644 "${tmp_dir}/packages.microsoft.gpg" /etc/apt/keyrings/packages.microsoft.gpg
-  sudo sh -c 'echo "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list'
+  run_privileged install -D -o root -g root -m 644 "${tmp_dir}/packages.microsoft.gpg" /etc/apt/keyrings/packages.microsoft.gpg
+  run_privileged sh -c 'echo "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list'
   rm -rf "${tmp_dir}"
 
-  sudo apt install -y apt-transport-https
-  sudo apt update
-  sudo apt install -y code
+  run_privileged apt install -y apt-transport-https
+  run_privileged apt update
+  run_privileged apt install -y code
 }
 
 install_vscode "$@"
@@ -690,8 +775,8 @@ install_beyond_compare () {
   # The page links the file under /files/, but the actual download is served
   # from the host root.
   download_file "https://www.scootersoftware.com/${deb_file}" "${tmp_dir}/${deb_file}"
-  sudo apt update
-  sudo apt install -y "${tmp_dir}/${deb_file}"
+  run_privileged apt update
+  run_privileged apt install -y "${tmp_dir}/${deb_file}"
   rm -rf "${tmp_dir}"
 }
 
@@ -719,7 +804,7 @@ EOF
 create_zsh_function "install_pip" << 'EOF'
 install_pip () {
   # Install pip in system python
-  sudo apt install -y python3-pip
+  run_privileged apt install -y python3-pip
 }
 
 install_pip "$@"
@@ -758,7 +843,7 @@ EOF
 
 create_zsh_function "install_yq" << 'EOF'
 install_yq () {
-  sudo snap install yq
+  run_privileged snap install yq
 }
 
 install_yq "$@"
@@ -790,10 +875,10 @@ install_rust () {
 
   # udev rules so probe-rs can reach the debug probe without sudo. Applies on
   # the next replug, or after the reload/trigger below.
-  sudo curl -fsSL https://probe.rs/files/69-probe-rs.rules \
+  run_privileged curl -fsSL https://probe.rs/files/69-probe-rs.rules \
     -o /etc/udev/rules.d/69-probe-rs.rules
-  sudo udevadm control --reload-rules
-  sudo udevadm trigger
+  run_privileged udevadm control --reload-rules
+  run_privileged udevadm trigger
 }
 
 install_rust "$@"
@@ -810,7 +895,7 @@ EOF
 create_zsh_function "install_jetbrains_toolbox" << 'EOF'
 install_jetbrains_toolbox () {
   # Install Jetbrains toobox - https://www.jetbrains.com/help/idea/installation-guide.html#fe5cb000
-  sudo apt install -y libfuse-dev
+  run_privileged apt install -y libfuse-dev
 
   # Resolve the current Toolbox build from JetBrains' releases feed (the old
   # pinned version went stale). Toolbox self-updates after the first install, so
@@ -843,7 +928,7 @@ EOF
 
 create_zsh_function "install_postman" << 'EOF'
 install_postman () {
-  sudo snap install postman
+  run_privileged snap install postman
 }
 
 install_postman "$@"
@@ -851,7 +936,7 @@ EOF
 
 create_zsh_function "install_backintime" << 'EOF'
 install_backintime () {
-  sudo apt install -y backintime-qt sshfs
+  run_privileged apt install -y backintime-qt sshfs
 }
 
 install_backintime "$@"
@@ -859,9 +944,9 @@ EOF
 
 create_zsh_function "install_obs_studio" << 'EOF'
 install_obs_studio () {
-  sudo add-apt-repository ppa:obsproject/obs-studio
-  sudo apt update
-  sudo apt install -y ffmpeg obs-studio
+  run_privileged add-apt-repository ppa:obsproject/obs-studio
+  run_privileged apt update
+  run_privileged apt install -y ffmpeg obs-studio
 }
 
 install_obs_studio "$@"
@@ -869,9 +954,9 @@ EOF
 
 create_zsh_function "install_mixxx" << 'EOF'
 install_mixxx () {
-  sudo add-apt-repository ppa:mixxx/mixxx
-  sudo apt update
-  sudo apt install -y mixxx
+  run_privileged add-apt-repository ppa:mixxx/mixxx
+  run_privileged apt update
+  run_privileged apt install -y mixxx
 }
 
 install_mixxx "$@"
@@ -879,7 +964,7 @@ EOF
 
 create_zsh_function "install_byobu" << 'EOF'
 install_byobu () {
-  sudo apt install -y byobu
+  run_privileged apt install -y byobu
 }
 
 install_byobu "$@"
@@ -911,9 +996,9 @@ EOF
 
 create_zsh_function "install_openshot" << 'EOF'
 install_openshot () {
-  sudo add-apt-repository ppa:openshot.developers/ppa
-  sudo apt update
-  sudo apt install -y openshot-qt python3-openshot
+  run_privileged add-apt-repository ppa:openshot.developers/ppa
+  run_privileged apt update
+  run_privileged apt install -y openshot-qt python3-openshot
 }
 
 install_openshot "$@"
@@ -921,7 +1006,7 @@ EOF
 
 create_zsh_function "install_direnv" << 'EOF'
 install_direnv () {
-  sudo apt install -y direnv
+  run_privileged apt install -y direnv
   echo "Don't forget to add the 'direnv' plugin to the list of plugins in ~/.zshrc"
 }
 
@@ -936,13 +1021,13 @@ install_wispr_flow () {
   add_signed_apt_repository "wispr-flow" \
     "https://pkg.wispr-flow-linux.dev/KEY.gpg" \
     "deb [signed-by=KEYRING arch=amd64,arm64] https://pkg.wispr-flow-linux.dev stable main"
-  sudo apt install -y wispr-flow
+  run_privileged apt install -y wispr-flow
 
   # Text injection writes to a /dev/uinput virtual keyboard, which is root-only
   # on stock images. The package ships a udev rule that ACLs it to the active
   # session, but joining the 'input' group is the cross-distro fallback. usermod
   # -aG is idempotent.
-  sudo usermod -aG input "$USER"
+  run_privileged usermod -aG input "$USER"
 
   echo "wispr-flow installed. A few one-time setup steps remain:"
   echo "  - Run 'wispr-flow --doctor' to verify uinput, clipboard, AT-SPI and the GNOME bridge."
@@ -987,12 +1072,12 @@ Unattended-Upgrade::Allowed-Origins:: "${distro_id}:${distro_codename}-updates";
 // Automatic reboot is deliberately left off (the default).
 CONF
 
-  sudo apt install -y unattended-upgrades
+  run_privileged apt install -y unattended-upgrades
 
   if cmp -s "${tmp_file}" "${dropin}"; then
     echo "${dropin} is already up to date."
   else
-    sudo install -m 0644 -o root -g root "${tmp_file}" "${dropin}"
+    run_privileged install -m 0644 -o root -g root "${tmp_file}" "${dropin}"
     echo "Wrote ${dropin}."
   fi
   rm -f "${tmp_file}"
@@ -1036,7 +1121,7 @@ echo "you want, e.g.:"
 echo "  install_github_cli"
 echo "  install_wispr_flow"
 echo
-echo "(download_file, add_signed_apt_repository and clone_or_pull are helpers the"
+echo "(download_file, add_signed_apt_repository, clone_or_pull and run_privileged are helpers the"
 echo "install_* functions use; the rest install software on demand.) Autoloading"
 echo "requires the 'zshrc.d' plugin in your ~/.zshrc plugins list."
 echo "======================================================================"
