@@ -953,6 +953,70 @@ install_wispr_flow () {
 install_wispr_flow "$@"
 EOF
 
+create_zsh_function "install_unattended_upgrades" << 'EOF'
+install_unattended_upgrades () {
+  # Configure Ubuntu's unattended-upgrades to patch the machine automatically
+  # (Cyber Essentials Plus expects security updates applied within 14 days).
+  #
+  # Everything lives in ONE local drop-in rather than edits to the packaged
+  # 20auto-upgrades / 50unattended-upgrades, which a package upgrade or
+  # `dpkg-reconfigure unattended-upgrades` can overwrite. apt reads apt.conf.d in
+  # alphabetical order and later files win, so 52-* overrides both.
+  #
+  # - package lists refresh daily (Ubuntu's default here is every 2 days)
+  # - the -updates pocket is allowed in addition to security/ESM. '::' APPENDS to
+  #   Allowed-Origins; a plain assignment would replace the security origins.
+  # - automatic reboot is deliberately left off (the default). Reboot by hand when
+  #   /var/run/reboot-required appears - kernel/libc fixes only apply after one.
+  #
+  # Idempotent: the drop-in is only rewritten when its content would change.
+  local dropin="/etc/apt/apt.conf.d/52unattended-upgrades-local"
+  local tmp_file
+  tmp_file="$(mktemp)"
+
+  cat > "${tmp_file}" << 'CONF'
+// Managed by machine-bootstrap (install_unattended_upgrades). Local overrides -
+// these survive package upgrades of unattended-upgrades.
+
+// Refresh package lists daily.
+APT::Periodic::Update-Package-Lists "1";
+
+// Also install non-security updates from the -updates pocket.
+Unattended-Upgrade::Allowed-Origins:: "${distro_id}:${distro_codename}-updates";
+
+// Automatic reboot is deliberately left off (the default).
+CONF
+
+  sudo apt install -y unattended-upgrades
+
+  if cmp -s "${tmp_file}" "${dropin}"; then
+    echo "${dropin} is already up to date."
+  else
+    sudo install -m 0644 -o root -g root "${tmp_file}" "${dropin}"
+    echo "Wrote ${dropin}."
+  fi
+  rm -f "${tmp_file}"
+
+  # Prove apt actually reads the settings, rather than trusting the file write.
+  local effective
+  effective="$(apt-config dump)"
+  if ! grep -qF 'APT::Periodic::Update-Package-Lists "1";' <<< "${effective}" \
+     || ! grep -qF -- '-updates";' <<< "${effective}"; then
+    echo "install_unattended_upgrades: apt does not report the expected settings - check ${dropin}" >&2
+    return 1
+  fi
+
+  if ! systemctl is-enabled --quiet apt-daily-upgrade.timer 2>/dev/null; then
+    echo "Warning: apt-daily-upgrade.timer is not enabled, so upgrades will not run on schedule." >&2
+  fi
+
+  echo "Unattended upgrades configured: daily list refresh, security + -updates, no automatic reboot."
+  echo "Reboot manually when /var/run/reboot-required exists."
+}
+
+install_unattended_upgrades "$@"
+EOF
+
 ok "Created ${#CREATED_ZSH_FUNCTIONS[@]} shell functions in ${ZSH_FUNCTIONS_DIR}"
 
 # ---------------------------------------------------------------------------
