@@ -37,6 +37,21 @@ security updates. Automatic reboot is deliberately left off, so reboot by hand
 when `/var/run/reboot-required` appears. It is idempotent and checks the result
 with `apt-config dump`.
 
+`install_gsconnect` installs GSConnect (KDE Connect for GNOME Shell) and gets it
+working. That includes the firewall: Ubuntu's UFW denies inbound traffic by
+default and the GNOME extension runs as your user, so it cannot open its own
+ports, and without them a phone on the same network never sees the laptop. It
+allows TCP and UDP 1714-1764 from `192.168.0.0/16` only, never the internet. To
+restrict it further, or to cover other private ranges, list your own networks:
+
+```bash
+GSCONNECT_FIREWALL_SOURCES="192.168.5.0/24 192.168.10.0/24" install_gsconnect
+```
+
+The firewall step only adds rules (it never enables UFW), is safe to re-run, and
+is checked with `ufw show added`. A newly installed extension is not visible to
+the running GNOME Shell until you log out and back in, so enable it then.
+
 ## Running without sudo
 
 The bootstrap works from an account that has no sudo rights (a standard

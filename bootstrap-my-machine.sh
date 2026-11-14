@@ -1102,6 +1102,59 @@ CONF
 install_unattended_upgrades "$@"
 EOF
 
+create_zsh_function "install_gsconnect" << 'EOF'
+install_gsconnect () {
+  # Install GSConnect (KDE Connect for GNOME Shell, for sending files, clipboard
+  # and notifications between a phone and this machine) and make it work.
+  #
+  # "Make it work" includes the firewall. Ubuntu's UFW denies all inbound traffic
+  # by default and neither the package nor the extension (which runs as your user,
+  # so cannot change firewall rules) opens the ports. Symptom without it: phone
+  # and laptop are on the same network but never see each other. Phones find the
+  # laptop with a UDP broadcast to 1716 and then connect back to TCP 1716; file
+  # transfers use the rest of 1714-1764.
+  #
+  # Only the 192.168.0.0/16 private range is allowed by default, so the ports are
+  # not open to the internet. Override with GSCONNECT_FIREWALL_SOURCES, a
+  # space-separated list of CIDRs (e.g. "192.168.5.0/24 10.0.0.0/8"), to be
+  # stricter or to cover other private ranges.
+  #
+  # The firewall step only ADDS rules: it never enables UFW, and re-running is a
+  # no-op because UFW skips rules that already exist.
+  local sources="${GSCONNECT_FIREWALL_SOURCES:-192.168.0.0/16}"
+  local ports="1714:1764"
+  local comment="KDE Connect / GSConnect"
+  local uuid="gsconnect@andyholmes.github.io"
+  local cidr proto
+
+  # Recommends (python3-nautilus for the file-manager menu, sshfs for browsing the
+  # phone's files) come along by default.
+  run_privileged apt install -y gnome-shell-extension-gsconnect ufw
+
+  for cidr in ${=sources}; do
+    for proto in tcp udp; do
+      run_privileged ufw allow proto "${proto}" from "${cidr}" to any port "${ports}" comment "${comment}"
+    done
+  done
+
+  echo "UFW allows KDE Connect / GSConnect (${ports}, tcp+udp) from: ${sources}"
+  if ! run_privileged ufw status | grep -q '^Status: active'; then
+    echo "Note: UFW is not enabled, so these rules are stored but not yet enforced."
+  fi
+
+  # A freshly installed extension is unknown to the running GNOME Shell until the
+  # next login, so enabling can legitimately fail; that is not an install failure.
+  if command -v gnome-extensions > /dev/null && gnome-extensions enable "${uuid}" 2> /dev/null; then
+    echo "GSConnect extension enabled."
+  else
+    echo "GSConnect installed. Log out and back in, then enable it in the Extensions app."
+  fi
+  echo "Then install KDE Connect on your phone, open it, and pair with this machine."
+}
+
+install_gsconnect "$@"
+EOF
+
 ok "Created ${#CREATED_ZSH_FUNCTIONS[@]} shell functions in ${ZSH_FUNCTIONS_DIR}"
 
 # ---------------------------------------------------------------------------
