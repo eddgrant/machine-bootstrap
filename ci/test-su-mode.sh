@@ -150,8 +150,11 @@ run_as_user bash "${user_home}/machine-bootstrap/ci/run-installer.sh" install_un
 dropin="/etc/apt/apt.conf.d/52unattended-upgrades-local"
 [ -f "${dropin}" ] || fail "${dropin} was not created"
 [ "$(stat -c %U "${dropin}")" = "root" ] || fail "${dropin} is not owned by root"
-apt-config dump | grep -qF 'APT::Periodic::Update-Package-Lists "1";' || fail "apt does not see the daily list refresh"
-apt-config dump | grep -qF -- '-updates";' || fail "apt does not see the -updates origin"
+# Capture first: 'apt-config dump | grep -q' fails under pipefail, because grep -q
+# exits at the first match and apt-config then dies of SIGPIPE.
+apt_settings="$(apt-config dump)"
+grep -qF 'APT::Periodic::Update-Package-Lists "1";' <<< "${apt_settings}" || fail "apt does not see the daily list refresh"
+grep -qF -- '-updates";' <<< "${apt_settings}" || fail "apt does not see the -updates origin"
 pass "drop-in written by root and visible to apt"
 
 echo "All su-mode checks passed."
