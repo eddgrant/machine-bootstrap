@@ -60,6 +60,10 @@ jobs:
     # Optional installers (snaps, fragile external sources) are allowed to fail
     # without failing the build; required ones turn the build red.
     continue-on-error: ${{ matrix.optional }}
+    # The runner user has passwordless sudo; say so explicitly rather than rely on
+    # run_privileged's group-based detection. The su path has its own job below.
+    env:
+      BOOTSTRAP_PRIVILEGE: sudo
     strategy:
       fail-fast: false
       max-parallel: 12
@@ -89,6 +93,20 @@ jobs:
           name: result-${{ matrix.name }}
           path: results/${{ matrix.name }}.tsv
           retention-days: 7
+
+  # Proves the "no sudo" scenario: an account with no sudo rights runs the
+  # bootstrap and an installer by su'ing to a separate admin account. The script
+  # creates throwaway users and edits PAM, which is safe only on a disposable
+  # runner - hence the explicit opt-in variable.
+  su-mode:
+    name: su mode (account without sudo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the su-mode test
+        run: sudo CI_SU_TEST_ALLOW=1 bash ci/test-su-mode.sh
 
   summary:
     name: summary
