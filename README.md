@@ -48,8 +48,8 @@ restrict it further, or to cover other private ranges, list your own networks:
 GSCONNECT_FIREWALL_SOURCES="192.168.5.0/24 192.168.10.0/24" install_gsconnect
 ```
 
-The firewall step only adds rules (it never enables UFW), is safe to re-run, and
-is checked with `ufw show added`. A newly installed extension is not visible to
+The firewall step only adds rules (it never enables UFW) and is safe to re-run.
+A newly installed extension is not visible to
 the running GNOME Shell until you log out and back in, so enable it then.
 
 ## Running without sudo
@@ -108,6 +108,14 @@ latter. A PAM rule lets that one user pair through `su` without a password, so t
 `su` -> `sudo` -> command path is exercised but the password prompt itself is not.
 The script refuses to run unless `CI_SU_TEST_ALLOW=1`, because it creates users
 and edits PAM - never run it on a real machine.
+
+A **`gsconnect`** job goes further for `install_gsconnect`: [`ci/test-gsconnect.sh`](ci/test-gsconnect.sh)
+asserts the package is installed, UFW holds exactly the TCP and UDP rules for
+`1714:1764` from `192.168.0.0/16`, a re-run adds no duplicates,
+`GSCONNECT_FIREWALL_SOURCES` adds the source you ask for, and UFW's enabled state
+is untouched. It cannot show that packets really get through, as the runner has no
+phone. Like the su-mode test it edits system state, so it needs
+`CI_GSCONNECT_TEST_ALLOW=1`.
 
 CI verifies that each installer **runs to completion**, not that the resulting
 GUI app launches — the runner has no display server.

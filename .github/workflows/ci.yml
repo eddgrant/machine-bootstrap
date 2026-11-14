@@ -108,6 +108,24 @@ jobs:
       - name: Run the su-mode test
         run: sudo CI_SU_TEST_ALLOW=1 bash ci/test-su-mode.sh
 
+  # Verifies what install_gsconnect leaves behind (package, firewall rules,
+  # idempotence, the override variable), beyond the matrix's "ran to completion".
+  # It edits firewall rules, so it needs the explicit opt-in on a disposable runner.
+  gsconnect:
+    name: gsconnect firewall rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BOOTSTRAP_PRIVILEGE: sudo
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap the zsh framework
+        run: ./bootstrap-my-machine.sh
+
+      - name: Run the gsconnect test
+        run: CI_GSCONNECT_TEST_ALLOW=1 bash ci/test-gsconnect.sh
+
   summary:
     name: summary
     needs: install
