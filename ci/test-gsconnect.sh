@@ -37,7 +37,7 @@ kde_connect_rules() {
 
 # assert_rule <proto> <source>
 assert_rule() {
-  kde_connect_rules | grep -qF "proto $1 from $2 to any port 1714:1764" \
+  kde_connect_rules | grep -qF "from $2 to any port 1714:1764 proto $1" \
     || fail "no $1 rule from $2 for ports 1714:1764. Rules were: $(kde_connect_rules)"
 }
 
