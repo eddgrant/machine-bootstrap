@@ -37,6 +37,23 @@ user_home="/home/${user}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok: $*"; }
 
+# The bootstrap keeps its noisy output in a log file and prints only its path,
+# which on a CI runner nobody can open afterwards. Print the logs on failure so
+# the actual error is in the job output.
+print_logs_on_failure() {
+  local status=$?
+  if [ "${status}" -ne 0 ]; then
+    local log
+    for log in /tmp/bootstrap-my-machine/*.log; do
+      [ -e "${log}" ] || continue
+      echo "::group::${log}"
+      cat "${log}"
+      echo "::endgroup::"
+    done
+  fi
+}
+trap print_logs_on_failure EXIT
+
 export DEBIAN_FRONTEND=noninteractive
 command -v sudo > /dev/null || { apt-get update -qq; apt-get install -y -qq sudo; }
 
