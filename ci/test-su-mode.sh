@@ -76,11 +76,17 @@ chown -R "${user}:${user}" "${user_home}/machine-bootstrap"
 
 # run_as_user <command...>: run as the unprivileged user with a clean-ish env.
 # BOOTSTRAP_ADMIN_USER is supplied so nothing needs a terminal to prompt.
+# It starts in the user's home: runuser keeps the caller's working directory, which
+# on a CI runner is the runner's checkout, unreadable to ${user}. oh-my-zsh's
+# installer cd's back to where it started and aborts when that is not accessible.
 run_as_user() {
-  runuser -u "${user}" -- env \
-    HOME="${user_home}" USER="${user}" LOGNAME="${user}" \
-    BOOTSTRAP_ADMIN_USER="${admin}" DEBIAN_FRONTEND=noninteractive \
-    "$@"
+  (
+    cd "${user_home}"
+    runuser -u "${user}" -- env \
+      HOME="${user_home}" USER="${user}" LOGNAME="${user}" \
+      BOOTSTRAP_ADMIN_USER="${admin}" DEBIAN_FRONTEND=noninteractive \
+      "$@"
+  )
 }
 
 echo "==> Precondition: ${user} really has no sudo"
